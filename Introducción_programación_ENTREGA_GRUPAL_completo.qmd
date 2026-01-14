@@ -1,0 +1,1036 @@
+---
+title: "Entrega grupal Introducción a la programación"
+format:
+  html:
+    code-fold: false
+    theme: cosmo
+jupyter: python3
+---
+# Utills
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+from mplsoccer import Pitch
+from pathlib import Path
+import os
+import json
+import numpy as np
+import seaborn as sns
+
+# ============================================================
+# 1) FUNCIÓN: POSICIÓN ESPECÍFICA -> ROL GENERAL
+#    (Luego, cuando juntemos todo, esta función ya no hará falta duplicarla,
+#     pero aquí la necesito para probar mi parte.)
+# ============================================================
+
+def get_general_position(pos_name):
+    pos = str(pos_name).upper().strip()
+
+    defenders = ['GK', 'LCB', 'LB', 'RB', 'RCB', 'CB', 'LWB', 'RWB']
+    midfielders = ['AM', 'DM', 'LDM', 'RDM', 'LM', 'RM']
+    forwards = ['LW', 'RW', 'CF', 'LF', 'RF']
+
+    if pos in defenders:
+        return 'Defender'
+    elif pos in midfielders:
+        return 'Midfielder'
+    elif pos in forwards:
+        return 'Forward'
+    else:
+        return 'Unknown'
+
+```
+
+# Consulta 1. Diferencia entre eventos y tracking en carreras sin balón (Adrián)
+
+
+## 1. Cargar datos
+
+```{python}
+
+# Colores por tipo de carrera
+colores = {
+    'behind': '#FF6B6B',
+    'coming_short': '#4ECDC4',
+    'pulling_wide': '#45B7D1',
+    'overlap': '#9B59B6',  
+    'support': '#F39C12',
+    'cross_receiver': '#E74C3C',
+    'pulling_half_space': '#3498DB',
+    'run_ahead_of_the_ball': '#FF8C42',
+    'dropping_off': '#95A5A6',
+    'underlap': '#1ABC9C'
+}
+
+# Cargar todos los partidos
+carpeta = Path(r'C:\Users\david\Desktop\URJC\1.er Semestre\Introducción al Sports Analytics\opendata\opendata\data\matches')
+lista = []
+
+for partido in carpeta.iterdir():
+    if partido.is_dir():
+        archivos = list(partido.glob('*_dynamic_events.csv'))
+        if archivos:
+            datos = pd.read_csv(archivos[0])
+            datos['match_id'] = partido.name
+            lista.append(datos)
+
+df = pd.concat(lista, ignore_index=True)
+
+# Filtrar solo carreras
+carreras = df[df['event_type'] == 'off_ball_run']
+print(f"Total carreras: {len(carreras)}")
+```
+
+## 2. Ver partidos disponibles
+
+```{python}
+print("IDs de partidos disponibles:")
+print(carreras['match_id'].unique())
+```
+
+## 3. Ver jugadores disponibles
+
+```{python}
+jugadores = carreras[['match_id', 'player_id', 'player_name', 'player_position', 'team_shortname']].drop_duplicates()
+print(jugadores.sort_values(['match_id', 'player_name']).to_string(index=False))
+```
+
+## 4. Seleccionar partido y jugador
+
+```{python}
+
+mi_partido = "1886347"
+mi_jugador = 38673
+# =============================================
+
+# Aplicar filtro
+carreras_filtradas = carreras[(carreras['match_id'] == mi_partido) & 
+                               (carreras['player_id'] == mi_jugador)]
+
+print(f"Carreras encontradas: {len(carreras_filtradas)}")
+```
+
+## 5. Visualización
+
+```{python}
+#| fig-width: 14
+#| fig-height: 7
+
+# Crear campo
+pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='white')
+fig, ejes = plt.subplots(1, 2, figsize=(14, 7))
+pitch.draw(ax=ejes[0])
+
+# Dibujar cada carrera
+for i, carrera in carreras_filtradas.iterrows():
+    # Coordenadas
+    x1 = (carrera['x_start'] + 52.5) * (120 / 105)
+    y1 = (carrera['y_start'] + 34) * (80 / 68)
+    x2 = (carrera['x_end'] + 52.5) * (120 / 105)
+    y2 = (carrera['y_end'] + 34) * (80 / 68)
+    
+    # Color según tipo
+    color = colores.get(carrera['event_subtype'], '#BDC3C7')
+    
+    # Dibujar flecha y punto
+    pitch.arrows(x1, y1, x2, y2, ax=ejes[0], color=color, width=2, headwidth=6, alpha=0.8)
+    pitch.scatter(x1, y1, ax=ejes[0], c=color, s=40, edgecolors='white', linewidth=0.5)
+
+# Título
+nombre = carreras_filtradas['player_name'].iloc[0] if len(carreras_filtradas) > 0 else "Sin datos"
+ejes[0].set_title(f"{nombre} - Partido {mi_partido}", fontsize=12, color='white')
+
+# Gráfico de barras
+conteo = carreras_filtradas['event_subtype'].value_counts()
+colores_barras = [colores.get(t, '#BDC3C7') for t in conteo.index]
+ejes[1].barh(conteo.index, conteo.values, color=colores_barras)
+ejes[1].set_xlabel('Cantidad')
+ejes[1].set_title('Tipos de carrera')
+
+plt.tight_layout()
+plt.show()
+```
+
+## 6. Trayectoria real (con datos de tracking)
+
+Esta sección muestra la trayectoria real del jugador durante cada carrera usando los datos de tracking.
+
+```{python}
+
+# Cargar datos de tracking del partido seleccionado
+### archivo_tracking = Path(f'data/matches/{mi_partido}/{mi_partido}_tracking_extrapolated.jsonl') quitar para final
+archivo_tracking = Path(
+    fr"C:\Users\david\Desktop\URJC\1.er Semestre\Introducción al Sports Analytics\opendata\opendata\data\matches\{mi_partido}\{mi_partido}_tracking_extrapolated.jsonl"
+)
+
+# Verificar que el archivo existe
+if not archivo_tracking.exists():
+    print(f"⚠️ ERROR: No existe el archivo de tracking para el partido {mi_partido}")
+    print(f"Archivo buscado: {archivo_tracking}")
+    print("\nPartidos con tracking disponible:")
+    for p in Path('data/matches').iterdir():
+        if (p / f"{p.name}_tracking_extrapolated.jsonl").exists():
+            print(f"  - {p.name}")
+else:
+    # Leer todas las líneas del archivo tracking
+    print("Cargando datos de tracking... (puede tardar)")
+    frames_tracking = {}
+    with open(archivo_tracking, 'r') as f:
+        for linea in f:
+            frame_data = json.loads(linea)
+            frames_tracking[frame_data['frame']] = frame_data
+    
+    print(f"Frames cargados: {len(frames_tracking)}")
+```
+
+```{python}
+#| fig-width: 14
+#| fig-height: 9
+
+# Solo dibujar si se cargaron los datos de tracking
+if 'frames_tracking' in dir() and len(frames_tracking) > 0:
+    # Crear visualización con todas las trayectorias reales
+    pitch = Pitch(pitch_type='statsbomb', pitch_color='#1a1a2e', line_color='white')
+    fig, ax = pitch.draw(figsize=(14, 9))
+    
+    # Recorrer cada carrera filtrada
+    for i, carrera in carreras_filtradas.iterrows():
+        # Obtener frames de inicio y fin
+        frame_inicio = carrera['frame_start']
+        frame_fin = carrera['frame_end']
+        player_id = carrera['player_id']
+        
+        # Verificar si hay que invertir las coordenadas
+        # Los eventos están normalizados para atacar siempre hacia la derecha
+        # El tracking tiene coordenadas absolutas
+        invertir = carrera['attacking_side'] == 'right_to_left'
+        
+        # Extraer las posiciones del jugador durante esta carrera
+        posiciones_x = []
+        posiciones_y = []
+        
+        for frame_num in range(int(frame_inicio), int(frame_fin) + 1):
+            if frame_num in frames_tracking:
+                frame_data = frames_tracking[frame_num]
+                # Buscar al jugador en este frame
+                for jugador in frame_data.get('player_data', []):
+                    if jugador.get('player_id') == player_id:
+                        if jugador.get('x') is not None and jugador.get('y') is not None:
+                            x = jugador['x']
+                            y = jugador['y']
+                            # Invertir si es necesario para normalizar
+                            if invertir:
+                                x = -x
+                                y = -y
+                            posiciones_x.append(x)
+                            posiciones_y.append(y)
+                        break
+        
+        # Si hay posiciones, dibujar la trayectoria
+        if len(posiciones_x) > 1:
+            # Convertir coordenadas SkillCorner a mplsoccer
+            x_conv = [(x + 52.5) * (120 / 105) for x in posiciones_x]
+            y_conv = [(y + 34) * (80 / 68) for y in posiciones_y]
+            
+            # Color según tipo
+            color = colores.get(carrera['event_subtype'], '#BDC3C7')
+            
+            # Dibujar trayectoria
+            ax.plot(x_conv, y_conv, color=color, linewidth=2, alpha=0.7)
+            
+            # Punto inicio
+            ax.scatter(x_conv[0], y_conv[0], c=color, s=50, edgecolors='white', linewidth=0.5, zorder=3)
+            
+            # Flecha al final
+            ax.annotate('', xy=(x_conv[-1], y_conv[-1]), xytext=(x_conv[-2], y_conv[-2]),
+                       arrowprops=dict(arrowstyle='->', color=color, lw=2))
+    
+    # Título
+    nombre = carreras_filtradas['player_name'].iloc[0] if len(carreras_filtradas) > 0 else "Sin datos"
+    ax.set_title(f"Trayectorias reales: {nombre} - Partido {mi_partido} ({len(carreras_filtradas)} carreras)", 
+                 fontsize=14, color='white')
+    
+    # Crear leyenda con los tipos de carrera presentes
+    tipos_presentes = carreras_filtradas['event_subtype'].unique()
+    for tipo in tipos_presentes:
+        color = colores.get(tipo, '#BDC3C7')
+        ax.plot([], [], color=color, linewidth=3, label=tipo.replace('_', ' ').title())
+    
+    ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
+    
+    plt.show()
+else:
+    print("⚠️ No hay datos de tracking. Elige un partido con tracking disponible.")
+```
+
+## 7. Diferencia de distancias entre carrera evento y tracking
+
+Comparamos la distancia calculada desde el evento (línea recta inicio-fin) vs la distancia real del tracking (suma de todos los segmentos).
+
+```{python}
+# Lista para guardar resultados
+resultados = []
+
+# Solo calcular si hay datos de tracking
+if 'frames_tracking' in dir() and len(frames_tracking) > 0:
+    
+    for i, carrera in carreras_filtradas.iterrows():
+        # Distancia del evento (línea recta)
+        dist_evento = np.sqrt(
+            (carrera['x_end'] - carrera['x_start'])**2 + 
+            (carrera['y_end'] - carrera['y_start'])**2
+        )
+        
+        # Obtener posiciones del tracking
+        frame_inicio = carrera['frame_start']
+        frame_fin = carrera['frame_end']
+        player_id = carrera['player_id']
+        invertir = carrera['attacking_side'] == 'right_to_left'
+        
+        posiciones_x = []
+        posiciones_y = []
+        
+        for frame_num in range(int(frame_inicio), int(frame_fin) + 1):
+            if frame_num in frames_tracking:
+                frame_data = frames_tracking[frame_num]
+                for jugador in frame_data.get('player_data', []):
+                    if jugador.get('player_id') == player_id:
+                        if jugador.get('x') is not None and jugador.get('y') is not None:
+                            x = jugador['x']
+                            y = jugador['y']
+                            if invertir:
+                                x = -x
+                                y = -y
+                            posiciones_x.append(x)
+                            posiciones_y.append(y)
+                        break
+        
+        # Calcular distancia real del tracking (suma de segmentos)
+        dist_tracking = 0
+        if len(posiciones_x) > 1:
+            for j in range(1, len(posiciones_x)):
+                dist_tracking += np.sqrt(
+                    (posiciones_x[j] - posiciones_x[j-1])**2 + 
+                    (posiciones_y[j] - posiciones_y[j-1])**2
+                )
+        
+        # Diferencia
+        diferencia = dist_tracking - dist_evento
+        
+        resultados.append({
+            'Tipo': carrera['event_subtype'],
+            'Dist. Evento (m)': round(dist_evento, 2),
+            'Dist. Tracking (m)': round(dist_tracking, 2),
+            'Diferencia (m)': round(diferencia, 2),
+            '% Extra': round((diferencia / dist_evento * 100) if dist_evento > 0 else 0, 1)
+        })
+    
+    # Crear tabla
+    tabla = pd.DataFrame(resultados)
+    print(tabla.to_string(index=False))
+    
+    # Resumen
+    print(f"\n📊 RESUMEN:")
+    print(f"   Distancia media evento: {tabla['Dist. Evento (m)'].mean():.2f} m")
+    print(f"   Distancia media tracking: {tabla['Dist. Tracking (m)'].mean():.2f} m")
+    print(f"   Diferencia media: {tabla['Diferencia (m)'].mean():.2f} m")
+    print(f"   Porcentaje extra medio: {tabla['% Extra'].mean():.1f}%")
+else:
+    print("⚠️ No hay datos de tracking disponibles")
+```
+
+## Conclusiones extraídas Consulta 1.
+
+La mayoría de las carreras evaluadas en la consulta parecen ser de trayectoria lineal. Este hecho se ve reflejado por la escasa diferencia existente entre la trayectoria totalmente recta derivada de x e y para momenos iniciales y finales de eventing en relación a las trayectorias reales obtenidas a través del tracking.
+
+# Consulta 2 Xthreat absoluto y relativo (David)
+
+#### ¿En qué zonas del campo se genera mayor xThreat (volumen total) y en qué zonas cada acción es más eficiente (xThreat medio por evento)?
+
+```{python}
+df["xthreat"] = pd.to_numeric(df["xthreat"], errors="coerce")
+
+total_eventos = len(df)
+eventos_con_xt = df["xthreat"].notna().sum()
+
+
+print(f"Eventos totales: {total_eventos}")
+print(f"Eventos con xThreat: {eventos_con_xt}")
+print(f"Porcentaje con xThreat: {eventos_con_xt / total_eventos * 100:.1f}%")
+```
+
+```{python}
+
+df_xt = df.dropna(subset=["xthreat"]).copy()
+# Binning (campo SkillCorner: x ~ [-52.5, 52.5], y ~ [-34, 34])
+n_x_bins = 3
+n_y_bins = 5
+
+df_map = df_xt.dropna(subset=["x_start", "y_start"]).copy()
+
+# Crear bins
+df_map["x_bin"] = pd.cut(df_map["x_start"], bins=n_x_bins, labels=False)
+df_map["y_bin"] = pd.cut(df_map["y_start"], bins=n_y_bins, labels=False)
+
+zone = (
+    df_map.groupby(["x_bin", "y_bin"], as_index=False)
+    .agg(
+        xT_abs=("xthreat", "sum"),
+        n_events=("xthreat", "size"),
+        x_mean=("x_start", "mean"),
+        y_mean=("y_start", "mean")
+    )
+)
+
+zone["xT_rel"] = zone["xT_abs"] / zone["n_events"]
+
+# Convertir a coordenadas mplsoccer StatsBomb
+zone["x_plot"] = (zone["x_mean"] + 52.5) * (120 / 105)
+zone["y_plot"] = (zone["y_mean"] + 34) * (80 / 68)
+
+# Tamaño: volumen absoluto (escalado)
+sizes = (zone["xT_abs"] / zone["xT_abs"].max()) * 1200 + 50
+
+pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="white")
+fig, ax = pitch.draw(figsize=(12, 8))
+
+sc = ax.scatter(
+    zone["x_plot"], zone["y_plot"],
+    s=sizes,
+    c=zone["xT_rel"],
+    cmap="hot",
+    alpha=0.85,
+    edgecolors="white",
+    linewidths=0.5
+)
+
+# Colorbar con etiqueta (equivale a "eje" de la escala de color)
+cbar = plt.colorbar(sc, ax=ax)
+cbar.set_label("xThreat relativo (media por evento)")
+
+# Título descriptivo
+ax.set_title(
+    "Mapa espacial de xThreat: volumen total (tamaño) y eficiencia media (color)",
+    fontsize=13,
+    color="black"
+)
+
+# Etiquetas de ejes (opcionales en un pitch, pero cumplen el enunciado)
+ax.set_xlabel("Coordenada X (progresión hacia portería rival)")
+ax.set_ylabel("Coordenada Y (ancho del campo)")
+
+# Mini-leyenda textual dentro del gráfico para interpretabilidad
+ax.text(
+    2, 78,
+    "Tamaño = xThreat absoluto (suma)\nColor = xThreat relativo (media por evento)",
+    color="white",
+    fontsize=10,
+    bbox=dict(facecolor="black", alpha=0.35, boxstyle="round,pad=0.4")
+)
+
+plt.show()
+```
+
+#### Conclusiones
+
+Podemos ver que las acciones peligrosas se acumulan sobretodo en el último tercio (el ofensivo) Y que, dentro de estos, cuanto más céntrico te encuentres a la portería más peligro generas por acción. Curiosamente en esta muestra se genera más peligro por acción en el carril centro-derecho que en el carril centro-izquierdo. Podemos ver que en nuestro tercio del campo no se genera ningún peligro y que en el del medio se genera algo más y en su tercio es donde hay que generar el fútbol.
+
+# Consulta3 (Rocio)
+
+```{python}
+
+plt.close("all")
+
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
+
+CARPETA_PARTIDOS = "matches"
+
+# Partido que uso como "ejemplo visual" para el heatmap (el análisis global se hace para TODOS igualmente)
+ID_PARTIDO_HEATMAP = "1886347"
+
+# Resolución del heatmap (más bins = más detalle; con pocos eventos puede verse “cuadriculado”)
+BINS_X, BINS_Y = 25, 16
+
+# Guardar imagen del heatmap
+GUARDAR_PNG = True
+RUTA_SALIDA_PNG = f"heatmap_ataque_defensa_{ID_PARTIDO_HEATMAP}.png"
+
+# Semilla para que el jugador aleatorio sea reproducible (si no te interesa, comenta esta línea)
+np.random.seed(15)
+
+
+
+
+# ============================================================
+# 2) FUNCIONES AUXILIARES (para no repetir código)
+# ============================================================
+
+def reescalar_a_campo(serie: pd.Series, max_objetivo: float) -> pd.Series:
+    """
+    Reescala coordenadas a [0, max_objetivo] de forma robusta.
+
+    En estos datos a veces las coordenadas ya vienen como 0..L,
+    otras vienen centradas en 0, y otras vienen en un rango raro.
+    Por eso uso esta lógica:
+
+    - Si ya está en 0..max -> no toco nada.
+    - Si parece centrado en 0 -> desplazo sumando max/2.
+    - Si viene raro -> hago min-max scaling.
+    """
+    vmin = float(serie.min())
+    vmax = float(serie.max())
+
+    # Caso 1: ya está en rango [0, max]
+    if vmin >= -1e-6 and vmax <= max_objetivo + 1e-6:
+        return serie
+
+    # Caso 2: coordenadas centradas tipo [-max/2, max/2]
+    if vmin >= -max_objetivo / 2 - 5 and vmax <= max_objetivo / 2 + 5:
+        return serie + (max_objetivo / 2.0)
+
+    # Caso 3: rango raro -> min-max
+    if abs(vmax - vmin) < 1e-9:
+        return pd.Series(np.zeros(len(serie)), index=serie.index)
+
+    return (serie - vmin) / (vmax - vmin) * max_objetivo
+
+
+def matriz_heatmap(x, y, largo, ancho, bins_x=25, bins_y=16):
+    """
+    Construye una matriz (bins_y, bins_x) con el número de eventos en cada celda.
+    Luego la usamos con imshow para pintar el mapa de calor.
+    """
+    if len(x) == 0 or len(y) == 0:
+        return np.zeros((bins_y, bins_x), dtype=float)
+
+    H, _, _ = np.histogram2d(
+        x, y,
+        bins=[bins_x, bins_y],
+        range=[[0, largo], [0, ancho]]
+    )
+    return H.T  # transpuesta para que (y,x) encaje con imshow
+
+
+def score_solape(mapa1, mapa2):
+    """
+    Mide cuánto se parecen dos heatmaps (0..1).
+    Normalizo ambos mapas a distribución (suma 1) y sumo el mínimo en cada celda.
+    Si solapan mucho -> valor cercano a 1.
+    """
+    s1 = mapa1.sum()
+    s2 = mapa2.sum()
+    if s1 <= 0 or s2 <= 0:
+        return 0.0
+
+    p = mapa1 / s1
+    q = mapa2 / s2
+    return float(np.minimum(p, q).sum())
+
+
+def dibujar_campo(ax, largo=105, ancho=68):
+    """
+    Dibuja un campo básico sin depender de librerías externas.
+    """
+    ax.set_xlim(0, largo)
+    ax.set_ylim(0, ancho)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    # Contorno del campo
+    ax.plot([0, largo, largo, 0, 0], [0, 0, ancho, ancho, 0], linewidth=2)
+
+    # Línea de medio campo
+    ax.plot([largo/2, largo/2], [0, ancho], linewidth=2)
+
+    # Círculo central
+    ax.add_patch(plt.Circle((largo/2, ancho/2), 9.15, fill=False, linewidth=2))
+    ax.scatter([largo/2], [ancho/2], s=12)
+
+    # Áreas (aprox. estándar)
+    profundidad_area = 16.5
+    ancho_area = 40.3
+    y0 = (ancho - ancho_area) / 2
+    ax.plot([0, profundidad_area, profundidad_area, 0],
+            [y0, y0, y0+ancho_area, y0+ancho_area], linewidth=2)
+    ax.plot([largo, largo-profundidad_area, largo-profundidad_area, largo],
+            [y0, y0, y0+ancho_area, y0+ancho_area], linewidth=2)
+
+    # Área pequeña
+    profundidad_area_peq = 5.5
+    ancho_area_peq = 18.32
+    y1 = (ancho - ancho_area_peq) / 2
+    ax.plot([0, profundidad_area_peq, profundidad_area_peq, 0],
+            [y1, y1, y1+ancho_area_peq, y1+ancho_area_peq], linewidth=2)
+    ax.plot([largo, largo-profundidad_area_peq, largo-profundidad_area_peq, largo],
+            [y1, y1, y1+ancho_area_peq, y1+ancho_area_peq], linewidth=2)
+
+    # Puntos de penalti
+    ax.scatter([11], [ancho/2], s=12)
+    ax.scatter([largo-11], [ancho/2], s=12)
+
+
+# ============================================================
+# PARTE A) PERFIL ATAQUE/DEFENSA POR ROL (TODOS LOS PARTIDOS)
+# ============================================================
+
+def perfil_rol_por_partido(id_partido: str, carpeta_base=CARPETA_PARTIDOS):
+    """
+    Para un partido:
+    - lee el JSON (para saber dimensiones del campo)
+    - lee eventos del CSV
+    - clasifica eventos en ataque/defensa
+    - crea 'rol_general' usando la función get_general_position()
+    - calcula perfil agregado por rol_general
+
+    Devuelve un DataFrame con una fila por rol ('Defender', 'Midfielder', 'Forward', 'Unknown').
+    """
+    carpeta = os.path.join(carpeta_base, id_partido)
+    ruta_csv = os.path.join(carpeta, f"{id_partido}_dynamic_events.csv")
+    ruta_json = os.path.join(carpeta, f"{id_partido}_match.json")
+
+    # Si falta algún fichero, salto el partido (así el script no se rompe)
+    if not os.path.exists(ruta_csv) or not os.path.exists(ruta_json):
+        return None
+
+    # 1) Medidas reales del campo
+    with open(ruta_json, "r", encoding="utf-8") as f:
+        info_partido = json.load(f)
+
+    largo_campo = float(info_partido.get("pitch_length", 105.0))
+    ancho_campo = float(info_partido.get("pitch_width", 68.0))
+
+    # 2) Eventos
+    eventos = pd.read_csv(ruta_csv)
+
+    if "player_position" not in eventos.columns:
+        raise ValueError(f"[{id_partido}] No existe la columna 'player_position' en el CSV.")
+
+    # 3) Coordenadas limpias
+    eventos["x_start"] = pd.to_numeric(eventos["x_start"], errors="coerce")
+    eventos["y_start"] = pd.to_numeric(eventos["y_start"], errors="coerce")
+    eventos = eventos.dropna(subset=["x_start", "y_start"]).copy()
+
+    # 4) Reescalado a dimensiones reales
+    eventos["x_campo"] = reescalar_a_campo(eventos["x_start"], largo_campo).clip(0, largo_campo)
+    eventos["y_campo"] = reescalar_a_campo(eventos["y_start"], ancho_campo).clip(0, ancho_campo)
+
+    # 5) Definición simple de fases:
+    #    - on_ball_engagement: sin posesión -> defensa
+    #    - resto: con posesión -> ataque
+    eventos["fase"] = np.where(
+        eventos["event_type"] == "on_ball_engagement",
+        "defensa",
+        "ataque"
+    )
+
+    # 6) Rol general (Defender/Midfielder/Forward/Unknown)
+    eventos["rol_general"] = eventos["player_position"].apply(get_general_position)
+
+    # 7) Conteo por jugador + rol + fase
+    conteos = (
+        eventos.groupby(["rol_general", "player_name", "fase"])
+              .size()
+              .unstack(fill_value=0)
+              .reset_index()
+    )
+
+    # Aseguro columnas aunque en algún partido falte alguna fase
+    if "ataque" not in conteos.columns:
+        conteos["ataque"] = 0
+    if "defensa" not in conteos.columns:
+        conteos["defensa"] = 0
+
+    # 8) Métricas por jugador
+    conteos["eventos_totales"] = conteos["ataque"] + conteos["defensa"]
+    conteos = conteos[conteos["eventos_totales"] > 0].copy()
+
+    # Ratio ofensivo (0..1): cuanto más alto, más eventos en ataque (posesión)
+    conteos["ratio_ataque"] = conteos["ataque"] / conteos["eventos_totales"]
+
+    # 9) Agregado final por rol (este partido)
+    perfil_rol = (
+        conteos.groupby("rol_general")
+               .agg(
+                   id_partido=("rol_general", lambda s: id_partido),
+                   n_jugadores=("player_name", "nunique"),
+                   ratio_ataque_medio=("ratio_ataque", "mean"),
+                   eventos_ataque_medios=("ataque", "mean"),
+                   eventos_defensa_medios=("defensa", "mean"),
+                   eventos_totales=("eventos_totales", "sum"),
+                   total_ataque=("ataque", "sum"),
+                   total_defensa=("defensa", "sum"),
+               )
+               .reset_index()
+    )
+
+    return perfil_rol
+
+
+def ejecutar_perfiles_todos_partidos():
+    """
+    Recorre todos los partidos dentro de matches/ y genera:
+    - perfil por rol por partido
+    - perfil global agregando todos los partidos
+    """
+    ids = sorted([d for d in os.listdir(CARPETA_PARTIDOS) if os.path.isdir(os.path.join(CARPETA_PARTIDOS, d))])
+
+    lista_perfiles = []
+    for idp in ids:
+        salida = perfil_rol_por_partido(idp)
+        if salida is not None:
+            lista_perfiles.append(salida)
+
+    perfiles_por_partido = pd.concat(lista_perfiles, ignore_index=True)
+
+    #print("\n=== PERFIL POR ROL (POR PARTIDO) ===")
+    #print(perfiles_por_partido.sort_values(["id_partido", "ratio_ataque_medio"], ascending=[True, False]))
+
+    # Perfil global (mejor ponderado por volumen de eventos)
+    perfil_global = (
+        perfiles_por_partido
+        .groupby("rol_general")
+        .agg(
+            n_partidos=("id_partido", "nunique"),
+            eventos_totales=("eventos_totales", "sum"),
+            total_ataque=("total_ataque", "sum"),
+            total_defensa=("total_defensa", "sum"),
+            ratio_ataque_medio_simple=("ratio_ataque_medio", "mean")  # media de ratios por partido (menos robusta)
+        )
+        .reset_index()
+    )
+
+    # Ratio ponderado: más fiable si hay partidos con muchos más eventos que otros
+    perfil_global["ratio_ataque_ponderado"] = perfil_global["total_ataque"] / perfil_global["eventos_totales"]
+    perfil_global = perfil_global.sort_values("ratio_ataque_ponderado", ascending=False)
+
+    print("\n=== PERFIL POR POSICION GLOBAL (TODOS LOS PARTIDOS) ===")
+    print(perfil_global)
+
+    # Guardado por si luego lo queréis meter en informe / gráficas
+    perfiles_por_partido.to_csv("perfiles_por_partido.csv", index=False)
+    perfil_global.to_csv("perfiles_global.csv", index=False)
+    #print("\nGuardados: perfiles_por_partido.csv y perfiles_global.csv")
+
+
+# ============================================================
+# PARTE B) HEATMAP (UN PARTIDO, UN JUGADOR ALEATORIO “NORMAL”)
+# ============================================================
+
+def elegir_jugador_aleatorio(eventos: pd.DataFrame,
+                            roles_excluidos=None,
+                            minimo_eventos=30) -> tuple[str, str, str]:
+    """
+    Elige un jugador al azar, evitando roles que no queremos para el ejemplo.
+
+    - roles_excluidos: lista de roles generales que NO queremos (ej: {'Defender'} si no quisieras defensas)
+    - minimo_eventos: evita elegir un jugador con muy pocos eventos (heatmap pobre)
+
+    Devuelve (nombre_jugador, posicion_especifica, rol_general).
+    """
+    if roles_excluidos is None:
+        roles_excluidos = set()
+
+    # Aseguro que existe rol_general para filtrar con la misma lógica del análisis
+    eventos = eventos.copy()
+    eventos["rol_general"] = eventos["player_position"].apply(get_general_position)
+
+    candidatos = eventos[~eventos["rol_general"].isin(roles_excluidos)].copy()
+
+    # Para que el ejemplo sea más “representativo”, intento elegir alguien con suficientes eventos
+    conteo_jugador = candidatos["player_name"].value_counts()
+    jugadores_validos = conteo_jugador[conteo_jugador >= minimo_eventos].index.tolist()
+
+    # Si nadie llega al mínimo, bajo el filtro para no quedarme sin opciones
+    if len(jugadores_validos) == 0:
+        jugadores_validos = conteo_jugador.index.tolist()
+
+    elegido = np.random.choice(jugadores_validos)
+
+    pos_especifica = candidatos.loc[candidatos["player_name"] == elegido, "player_position"].iloc[0]
+    rol = get_general_position(pos_especifica)
+
+    return str(elegido), str(pos_especifica), str(rol)
+
+
+def ejecutar_heatmap_jugador_aleatorio(id_partido=ID_PARTIDO_HEATMAP):
+    """
+    Genera el mapa de calor ataque vs defensa para un jugador elegido al azar.
+    Aquí excluyo el rol 'Unknown' y, si quieres, también puedes excluir a los porteros como 'Defender'
+    (ver comentario más abajo).
+    """
+    ruta_csv = f"matches/{id_partido}/{id_partido}_dynamic_events.csv"
+    ruta_json = f"matches/{id_partido}/{id_partido}_match.json"
+
+    # 1) Dimensiones del campo
+    with open(ruta_json, "r", encoding="utf-8") as f:
+        info_partido = json.load(f)
+
+    largo_campo = float(info_partido.get("pitch_length", 105.0))
+    ancho_campo = float(info_partido.get("pitch_width", 68.0))
+
+    #print(f"\nCampo (partido {id_partido}): {largo_campo} x {ancho_campo}")
+
+    # 2) Cargar eventos
+    eventos = pd.read_csv(ruta_csv)
+    #print("Eventos cargados:", eventos.shape)
+
+    # 3) Coordenadas limpias
+    eventos["x_start"] = pd.to_numeric(eventos["x_start"], errors="coerce")
+    eventos["y_start"] = pd.to_numeric(eventos["y_start"], errors="coerce")
+    eventos = eventos.dropna(subset=["x_start", "y_start"]).copy()
+    #print("Eventos con coords válidas:", eventos.shape)
+
+    # 4) Reescalar a dimensiones reales
+    eventos["x_campo"] = reescalar_a_campo(eventos["x_start"], largo_campo).clip(0, largo_campo)
+    eventos["y_campo"] = reescalar_a_campo(eventos["y_start"], ancho_campo).clip(0, ancho_campo)
+
+    # 5) Separar ataque/defensa
+    eventos_ataque = eventos[eventos["event_type"] != "on_ball_engagement"].copy()
+    eventos_defensa = eventos[eventos["event_type"] == "on_ball_engagement"].copy()
+
+    # 6) Elegir jugador al azar (filtrando roles raros)
+    # - Excluyo 'Unknown' para no elegir cosas raras.
+    # - Si además quieres evitar porteros, lo más simple es excluir posiciones 'GK'
+    #   pero como estamos trabajando por rol general, lo dejo así por defecto.
+    nombre_jugador, pos_especifica, rol = elegir_jugador_aleatorio(
+        eventos,
+        roles_excluidos={"Unknown"},
+        minimo_eventos=30
+    )
+
+    # Si quieres excluir sí o sí al portero: descomenta estas 2 líneas
+    # while pos_especifica.upper().strip() == "GK":
+    #     nombre_jugador, pos_especifica, rol = elegir_jugador_aleatorio(eventos, roles_excluidos={"Unknown"}, minimo_eventos=30)
+
+    print(f"Jugador elegido (aleatorio): {nombre_jugador} | Posición: {pos_especifica} | Rol: {rol}")
+
+    ataque_jugador = eventos_ataque[eventos_ataque["player_name"] == nombre_jugador].copy()
+    defensa_jugador = eventos_defensa[eventos_defensa["player_name"] == nombre_jugador].copy()
+
+    n_ataque = len(ataque_jugador)
+    n_defensa = len(defensa_jugador)
+
+    print("Eventos ataque del jugador:", n_ataque)
+    print("Eventos defensa del jugador:", n_defensa)
+
+    ratio_ataque = n_ataque / (n_ataque + n_defensa) if (n_ataque + n_defensa) > 0 else np.nan
+
+    # 7) Matrices heatmap
+    mapa_ataque = matriz_heatmap(
+        ataque_jugador["x_campo"].values,
+        ataque_jugador["y_campo"].values,
+        largo_campo, ancho_campo,
+        bins_x=BINS_X, bins_y=BINS_Y
+    )
+    mapa_defensa = matriz_heatmap(
+        defensa_jugador["x_campo"].values,
+        defensa_jugador["y_campo"].values,
+        largo_campo, ancho_campo,
+        bins_x=BINS_X, bins_y=BINS_Y
+    )
+
+    solape = score_solape(mapa_ataque, mapa_defensa)
+
+    # Escala común para poder comparar los dos mapas
+    vmax = max(mapa_ataque.max(), mapa_defensa.max())
+    if vmax == 0:
+        vmax = 1.0
+
+    # 8) Plot final: 2 campos lado a lado
+    fig, axs = plt.subplots(1, 2, figsize=(16, 7), constrained_layout=True)
+
+    # Ataque
+    dibujar_campo(axs[0], largo_campo, ancho_campo)
+    im0 = axs[0].imshow(
+        mapa_ataque, origin="lower",
+        extent=[0, largo_campo, 0, ancho_campo],
+        cmap="Reds", alpha=0.85,
+        vmin=0, vmax=vmax
+    )
+    axs[0].set_title(f"Ataque (posesión) – {nombre_jugador} ({rol})\nN={n_ataque}", fontsize=12)
+
+    # Defensa
+    dibujar_campo(axs[1], largo_campo, ancho_campo)
+    axs[1].imshow(
+        mapa_defensa, origin="lower",
+        extent=[0, largo_campo, 0, ancho_campo],
+        cmap="Blues", alpha=0.85,
+        vmin=0, vmax=vmax
+    )
+    axs[1].set_title(f"Defensa (sin posesión) – {nombre_jugador} ({rol})\nN={n_defensa}", fontsize=12)
+
+    fig.suptitle(
+        f"Perfil ataque/defensa (ejemplo visual) – Partido {id_partido}\n"
+        f"Posición: {pos_especifica} | Solape={solape:.3f} | Ratio ataque={ratio_ataque:.2f}",
+        fontsize=14
+    )
+
+    # Una sola barra de color para ambos mapas
+    cbar = fig.colorbar(im0, ax=axs, fraction=0.02, pad=0.02)
+    cbar.set_label("Conteo de eventos por celda", rotation=90)
+
+    if GUARDAR_PNG:
+        fig.savefig(RUTA_SALIDA_PNG, dpi=250, bbox_inches="tight")
+        #print("Guardado:", RUTA_SALIDA_PNG)
+
+    plt.show()
+    plt.close(fig)
+
+
+# ============================================================
+# EJECUCIÓN
+# ============================================================
+if __name__ == "__main__":
+    # 1) Parte cuantitativa: perfiles por rol general para todos los partidos
+    ejecutar_perfiles_todos_partidos()
+
+    # 2) Parte visual: heatmap de un jugador aleatorio (filtrando roles raros)
+    ejecutar_heatmap_jugador_aleatorio(ID_PARTIDO_HEATMAP)
+```
+
+**Conclusiones del análisis por roles (varios partidos)**
+
+Defensores Al observar el conjunto de partidos, los defensores son el rol que más acciones realiza con posesión del balón. Esto sugiere que, de forma habitual, participan mucho en la salida de balón y en la circulación del juego, y no se limitan únicamente a tareas defensivas. El patrón se repite partido tras partido, por lo que parece una característica clara del estilo de juego y no algo puntual de un encuentro concreto.
+
+Centrocampistas Los centrocampistas muestran un perfil bastante equilibrado entre acciones ofensivas y defensivas. A lo largo de los partidos analizados, su papel parece ser el de conectar las distintas fases del juego, participando tanto cuando el equipo tiene el balón como cuando necesita recuperarlo. Este comportamiento encaja bien con su función natural dentro del campo y se mantiene de forma bastante estable en el tiempo.
+
+Delanteros Aunque los delanteros siguen teniendo una mayoría de acciones ofensivas, los datos muestran que también participan de forma significativa en acciones sin posesión. Esto indica que su rol no se limita solo a atacar o finalizar jugadas, sino que también tienen una implicación constante en tareas como la presión o el trabajo defensivo tras pérdida. De nuevo, este patrón se observa de manera consistente a lo largo de los distintos partidos.
+
+Conclusión general En conjunto, el análisis de varios partidos muestra que los roles no están completamente separados entre ataque y defensa. Todos los perfiles participan en ambas fases del juego, aunque con distintos pesos según el rol. Esto apunta a un modelo de juego colectivo, donde las responsabilidades están repartidas y se mantienen de forma bastante constante a lo largo del tiempo.
+
+# ¿Existen perfiles ofensivos diferenciados según la posición táctica? (Juanjo)
+
+
+```{python}
+MIN_ACTIONS = 150
+TOP_ACTIONS=3
+MIN_THREAT=0.1
+
+def consolidate_events(raw_df):
+    df = raw_df.copy()
+    df['speed_avg_band_id'] = pd.to_numeric(df['speed_avg_band_id'], errors='coerce')
+    
+    event_rules = {
+        'player_possession': 'player_targeted_xthreat',
+        'passing_option': 'xthreat',
+        'off_ball_run': 'xthreat',
+        'on_ball_engagement': 'affected_line_breaking_passing_option_xthreat'
+    }
+    
+    processed_dfs = []
+
+    for event_type, metric_col in event_rules.items():
+        mask = (df["event_type"] == event_type) & (df[metric_col].notna())
+        temp_df = df[mask].copy()
+        
+        temp_df["Value"] = temp_df[metric_col]
+        temp_df["Speed"] = temp_df["speed_avg_band_id"].fillna(0)
+        
+        target_cols = ['player_name', 'Speed', 'Value', 'player_position']
+        processed_dfs.append(temp_df[target_cols])
+    
+    if processed_dfs:
+        return pd.concat(processed_dfs, ignore_index=True)
+    else:
+        # Return empty structure if no events found
+        return pd.DataFrame(columns=['player_name', 'Speed', 'Value', 'player_position'])
+
+
+#Transformation
+df_total = consolidate_events(df)
+
+player_counts = df_total["player_name"].value_counts()
+
+
+valid_players = player_counts[player_counts >= MIN_ACTIONS].index
+df_filtered = df_total[df_total['player_name'].isin(valid_players)].copy()
+
+df_filtered = df_filtered.sort_values("Value", ascending=False)
+
+df_top_actions = df_filtered.groupby("player_name").head(TOP_ACTIONS).copy()
+
+df_top_actions['Role'] = df_top_actions['player_position'].apply(get_general_position)
+chart_data = df_top_actions.groupby(['player_name']).agg({
+    'Value': 'sum',             # Suma total de peligro
+    'Speed': ['sum', 'count'],  # Suma de velocidad y conteo de acciones
+    'Role': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
+}).reset_index()
+
+
+chart_data = chart_data.rename(columns={
+    'Value': 'Total_Threat', 
+    'Momentum': 'Total_Momentum',
+    'Speed': 'Total_Actions'
+})
+
+chart_data.columns = ['player_name', 'Total_Threat', 'Speed_Sum', 'Total_Actions', 'Role']
+chart_data["Avg_Velocity"] = chart_data["Speed_Sum"] / chart_data["Total_Actions"]
+
+# Filter
+chart_data = chart_data[chart_data["Total_Threat"] > MIN_THREAT]
+chart_data = chart_data.reset_index(drop=True)
+
+#Visualization
+plt.figure(figsize=(10, 8))
+sns.set_theme(style="whitegrid")
+
+my_palette = {'Defender': '#1f77b4',   
+              'Midfielder': '#ff7f0e', 
+              'Forward': '#d62728'}    
+
+sns.scatterplot(
+    data=chart_data,
+    x='Avg_Velocity',
+    y='Total_Threat',
+    s=40,
+    hue='Role',
+    palette=my_palette,
+    hue_order=['Defender', 'Midfielder', 'Forward'],
+    edgecolor='black',
+    alpha=0.8
+)
+
+
+threshold = chart_data['Total_Threat'].quantile(0.60)
+for i in range(len(chart_data)):
+    if chart_data.iloc[i].Total_Threat > threshold:
+        plt.text(
+            x=chart_data.iloc[i].Avg_Velocity + 0.04,
+            y=chart_data.iloc[i].Total_Threat,
+            s=chart_data.iloc[i].player_name,
+            fontsize=9,
+            weight='bold',
+            color='#333333',
+            alpha=0.9
+        )
+
+h, l = plt.gca().get_legend_handles_labels()
+legend1 = plt.legend(h[:4], l[:4], bbox_to_anchor=(1.01, 1), loc='upper left', title="Posición", frameon=False)
+plt.gca().add_artist(legend1) 
+
+custom_lines = [
+    Line2D([0], [0], color='w', marker='o', markerfacecolor='gray', markersize=0, label='0: Standing'),
+    Line2D([0], [0], color='w', marker='o', markerfacecolor='gray', markersize=0, label='1: Jogging'),
+    Line2D([0], [0], color='w', marker='o', markerfacecolor='gray', markersize=0, label='2: Running'),
+    Line2D([0], [0], color='w', marker='o', markerfacecolor='gray', markersize=0, label='3: HSR'),
+    Line2D([0], [0], color='w', marker='o', markerfacecolor='gray', markersize=0, label='4: Sprinting')
+]
+
+plt.legend(handles=custom_lines, bbox_to_anchor=(1.01, 0.6), loc='upper left', title="Zonas de Velocidad", frameon=False)
+    
+plt.title('MAPA DE ESTILOS: Velocidad Media vs Peligro (Top 3 Acciones con mayor xthreat)', fontsize=14, weight='bold')
+plt.xlabel('Velocidad Media del Jugador', fontsize=11, labelpad=10)
+plt.ylabel('Peligro Acumulado (xThreat)', fontsize=11)
+plt.xticks(ticks=[0, 1, 2, 3, 4], labels=['0\n(Standing)', '1\n(Jogging)', '2\n(Running)', '3\n(HSR)', '4\n(Sprinting)'])
+plt.tight_layout()
+plt.show()
+
+df_top_actions.groupby(["Role","Speed"]).agg({'Value':'mean'}).reset_index().sort_values(by='Value', ascending=False)
+```
+
+El gráfico permite identificar si los delanteros generan peligro mediante desmarques en carrera (alta velocidad), mientras que los centrocampistas lo hacen en estático (baja velocidad), o si existen jugadores híbridos que rompen esta norma.
+
+### ¿Qué combinación específica de Rol y Velocidad genera las acciones de mayor calidad promedio (xThreat)?
+Según el análisis de eficiencia del Top 3 acciones, la combinación más letal es Forward(Delantero) en estado Sprinting
